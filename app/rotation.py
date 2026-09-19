@@ -19,6 +19,14 @@ no busy interval of *any* participant. Busy intervals reuse the
 block, DATE all-day events occupy local full days in the participant's own
 timezone, and intervals are merged with touching ones collapsed).
 
+Organizer candidate wall-clock times are resolved strictly against the
+organizer timezone: each (date, time) pair is localized with both
+``fold`` values and accepted only when the UTC round trip reproduces the
+requested wall time. A candidate inside a spring-forward gap (no valid
+instant) or a fall-back overlap (two instants) raises
+:class:`RotationError` naming the date, time and timezone instead of
+being silently moved to a moment the organizer did not request.
+
 A candidate's deviation for one participant is the number of minutes of
 the meeting that fall outside that participant's preferred local periods,
 measured on the participant's own local clock. All local wall-clock
@@ -114,17 +122,20 @@ def plan_fair_rotation(
         for p in participants
     }
 
-    # Build candidates on each organizer-local date (wall-clock -> UTC via
-    # zoneinfo, so the offset follows the DST rule in effect that day).
+    # Build candidates on each organizer-local date. Every wall-clock
+    # time is resolved strictly (see _resolve_local_start): a time that
+    # falls into a DST gap or overlap is rejected instead of being
+    # silently shifted to a different moment.
     raw_by_date: list[list[tuple[int, dt.datetime, dt.datetime]]] = []
     for date in dates:
         starts: dict[dt.datetime, tuple[int, dt.datetime, dt.datetime]] = {}
         for index, local_time in enumerate(candidate_times):
-            start = dt.datetime.combine(
-                date, local_time, tzinfo=organizer_tz
-            ).astimezone(UTC)
-            # Duplicate UTC instants (only possible on pathological DST
-            # input) collapse to their first input position.
+            start = _resolve_local_start(
+                date, local_time, organizer_tz, organizer_tzname
+            )
+            # Round-trip-verified wall times never collide, so only a
+            # literally repeated candidate time collapses, to its first
+            # input position.
             starts.setdefault(start, (index, start, start + duration))
         raw_by_date.append(list(starts.values()))
 
@@ -351,6 +362,51 @@ def _any_overlap(
                 break  # busy lists are sorted and merged
             return True
     return False
+
+
+def _resolve_local_start(
+    date: dt.date,
+    local_time: dt.time,
+    tz: ZoneInfo,
+    tzname: str,
+) -> dt.datetime:
+    """Resolve one organizer-local wall time to its UTC instant.
+
+    Both ``fold`` values are localized and converted back from UTC; a
+    mapping counts only when the round trip reproduces the requested wall
+    time. A spring-forward gap time therefore has no valid mapping and a
+    fall-back overlap time has two, and both are rejected rather than
+    silently shifted to a moment the organizer did not ask for.
+    """
+    naive = dt.datetime.combine(date, local_time)
+    matches: list[dt.datetime] = []
+    for fold in (0, 1):
+        utc = naive.replace(tzinfo=tz, fold=fold).astimezone(UTC)
+        if utc.astimezone(tz).replace(tzinfo=None) == naive and utc not in matches:
+            matches.append(utc)
+    if len(matches) == 1:
+        return matches[0]
+    label = _wall_label(local_time)
+    if not matches:
+        raise RotationError(
+            f"candidate time {label} on organizer-local date "
+            f"{date.isoformat()} does not exist in organizer timezone "
+            f"{tzname!r} (DST spring-forward gap); choose a different "
+            "candidate time"
+        )
+    raise RotationError(
+        f"candidate time {label} on organizer-local date "
+        f"{date.isoformat()} is ambiguous in organizer timezone "
+        f"{tzname!r} (DST fall-back overlap); choose a different "
+        "candidate time"
+    )
+
+
+def _wall_label(local_time: dt.time) -> str:
+    """Render a wall-clock time as HH:MM, keeping sub-minute precision."""
+    if local_time.second or local_time.microsecond:
+        return local_time.isoformat()
+    return local_time.isoformat(timespec="minutes")
 
 
 def _zone(tzname: str, what: str) -> ZoneInfo:

@@ -1221,10 +1221,14 @@ Feasibility and cost semantics:
 - All wall-clock ↔ UTC conversions (organizer candidates, participant
   preferences and all-day busy days) are built per local date with
   `zoneinfo`; fixed local times therefore follow DST in every timezone
-  (a spring-forward day is 23 local hours, a fall-back day 25). A
-  candidate landing in a spring-forward gap is moved forward by
-  `zoneinfo`'s normalization; a fall-back ambiguous time uses the first
-  (`fold=0`) offset.
+  (a spring-forward day is 23 local hours, a fall-back day 25).
+  Organizer candidate times are resolved strictly: each candidate is
+  localized with both `fold` values and accepted only when the UTC round
+  trip reproduces the requested wall time, so a candidate inside a
+  spring-forward gap (no valid instant) or a fall-back overlap (two
+  instants) is rejected with `422` naming the date, the wall-clock time
+  and the timezone, rather than being silently moved to a moment the
+  organizer did not ask for.
 - If any date has **no** feasible candidate, or the number of joint
   feasible schedules (the product of per-date feasible counts) exceeds
   **50 000**, the endpoint answers `422` without enumerating the space.
@@ -1377,6 +1381,9 @@ participant `timezone`, an offset-bearing `candidate_times` or
 `preferred_ranges` value, a preferred range with `end <= start` or
 crossing midnight, a non-positive `duration_minutes`, empty
 `dates`/`candidate_times`/`participants`, a duplicate `participant_id`,
+a `candidate_times` value that on some date falls into a DST
+spring-forward gap or fall-back overlap in the `organizer_timezone`
+(the message names the date, the wall-clock time and the timezone),
 a date whose every candidate conflicts with some participant calendar
 (the date is named in the message), a feasible combination count above
 50 000 (the actual count is named in the message), and every
