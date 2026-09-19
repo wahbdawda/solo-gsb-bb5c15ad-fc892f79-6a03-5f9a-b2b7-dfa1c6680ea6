@@ -12,6 +12,14 @@ date jointly so the rotation is as fair as possible:
 3. then minimize the tuple of chosen candidate input positions (so a
    request-identical instance always yields the same schedule).
 
+Organizer-local candidate wall-clock times are resolved to UTC with a
+strict fold-based check: both ``fold`` interpretations of the naive local
+time are round-tripped through UTC, and a candidate whose wall clock has
+no valid mapping (a spring-forward gap) or two mappings (a fall-back
+overlap) raises :class:`RotationError` naming the date, the time and the
+timezone, rather than being silently shifted to another moment or
+arbitrarily folded onto one of the two UTC instants.
+
 Busy calendars are expanded with the same recurrence engine as the rest
 of the service: a candidate is feasible for a date only when it overlaps
 no busy interval of *any* participant. Busy intervals reuse the
@@ -114,17 +122,20 @@ def plan_fair_rotation(
         for p in participants
     }
 
-    # Build candidates on each organizer-local date (wall-clock -> UTC via
-    # zoneinfo, so the offset follows the DST rule in effect that day).
+    # Build candidates on each organizer-local date. Each wall-clock time
+    # is resolved to UTC strictly: a time that does not exist on that date
+    # (spring-forward gap) or exists twice (fall-back overlap) fails the
+    # whole request instead of being silently moved or folded.
     raw_by_date: list[list[tuple[int, dt.datetime, dt.datetime]]] = []
     for date in dates:
         starts: dict[dt.datetime, tuple[int, dt.datetime, dt.datetime]] = {}
         for index, local_time in enumerate(candidate_times):
-            start = dt.datetime.combine(
-                date, local_time, tzinfo=organizer_tz
-            ).astimezone(UTC)
-            # Duplicate UTC instants (only possible on pathological DST
-            # input) collapse to their first input position.
+            start = _resolve_local_start(
+                date, local_time, organizer_tz, organizer_tzname
+            )
+            # Identical candidate times collapse to their first input
+            # position (strict resolution makes distinct wall-clock times
+            # map to distinct UTC instants on a given date).
             starts.setdefault(start, (index, start, start + duration))
         raw_by_date.append(list(starts.values()))
 
@@ -312,6 +323,42 @@ def _deviation(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _resolve_local_start(
+    date: dt.date,
+    local_time: dt.time,
+    tz: ZoneInfo,
+    tzname: str,
+) -> dt.datetime:
+    """Resolve an organizer-local wall-clock time to its UTC instant.
+
+    The naive local time is attached to the zone with each ``fold`` value
+    and every result is round-tripped through UTC: a mapping is real only
+    when converting back reproduces the same wall clock. A spring-forward
+    gap time survives neither fold (zero mappings) and a fall-back overlap
+    time survives both (two distinct mappings); both are rejected so a
+    meeting is never silently moved to a moment the request did not name.
+    """
+    naive = dt.datetime.combine(date, local_time)
+    mappings: list[dt.datetime] = []
+    for fold in (0, 1):
+        utc = naive.replace(tzinfo=tz, fold=fold).astimezone(UTC)
+        if utc.astimezone(tz).replace(tzinfo=None) == naive and utc not in mappings:
+            mappings.append(utc)
+    if len(mappings) == 1:
+        return mappings[0]
+    if not mappings:
+        raise RotationError(
+            f"candidate time {local_time.isoformat()} on organizer-local "
+            f"date {date.isoformat()} does not exist in timezone "
+            f"{tzname!r} (spring-forward gap)"
+        )
+    raise RotationError(
+        f"candidate time {local_time.isoformat()} on organizer-local "
+        f"date {date.isoformat()} is ambiguous in timezone "
+        f"{tzname!r} (fall-back overlap maps it to two UTC instants)"
+    )
 
 
 def _merge_intervals(

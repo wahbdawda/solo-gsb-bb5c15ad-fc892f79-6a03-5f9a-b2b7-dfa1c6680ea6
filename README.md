@@ -1221,10 +1221,14 @@ Feasibility and cost semantics:
 - All wall-clock ↔ UTC conversions (organizer candidates, participant
   preferences and all-day busy days) are built per local date with
   `zoneinfo`; fixed local times therefore follow DST in every timezone
-  (a spring-forward day is 23 local hours, a fall-back day 25). A
-  candidate landing in a spring-forward gap is moved forward by
-  `zoneinfo`'s normalization; a fall-back ambiguous time uses the first
-  (`fold=0`) offset.
+  (a spring-forward day is 23 local hours, a fall-back day 25). Each
+  organizer candidate time is resolved strictly: both `fold`
+  interpretations are round-tripped through UTC, and a candidate that
+  lands in a spring-forward gap (the wall-clock time does not exist) or
+  a fall-back overlap (the wall-clock time occurs twice) is rejected
+  with `422` naming the date, the time and the timezone — the meeting is
+  never silently moved to another moment or folded onto an arbitrary
+  UTC instant.
 - If any date has **no** feasible candidate, or the number of joint
   feasible schedules (the product of per-date feasible counts) exceeds
   **50 000**, the endpoint answers `422` without enumerating the space.
@@ -1377,6 +1381,9 @@ participant `timezone`, an offset-bearing `candidate_times` or
 `preferred_ranges` value, a preferred range with `end <= start` or
 crossing midnight, a non-positive `duration_minutes`, empty
 `dates`/`candidate_times`/`participants`, a duplicate `participant_id`,
+a candidate time that has no valid UTC mapping on its date in the
+`organizer_timezone` (spring-forward gap) or two mappings (fall-back
+overlap) — the message names the date, the time and the timezone —,
 a date whose every candidate conflicts with some participant calendar
 (the date is named in the message), a feasible combination count above
 50 000 (the actual count is named in the message), and every
@@ -1622,11 +1629,16 @@ types) are normal request-validation `422`s.
 
 - **Candidates are organizer-local**: each `candidate_times` wall-clock
   value is combined with each date in the `organizer_timezone` and
-  converted to UTC per local date with `zoneinfo` (never by adding a fixed
+  resolved to UTC per local date with `zoneinfo` (never by adding a fixed
   offset), so 09:00 organizer time shifts at the organizer's DST
-  transitions. The resulting duplicate UTC instants within one date (only
-  possible on pathological DST input) collapse to their first input
-  position.
+  transitions. The resolution is strict: both `fold` interpretations of
+  the naive local time are round-tripped through UTC and a mapping counts
+  only when converting back reproduces the same wall clock, so a
+  candidate whose wall clock has no valid mapping (spring-forward gap) or
+  two mappings (fall-back overlap) fails the whole request with `422`
+  naming the date, the time and the timezone — instead of being silently
+  shifted or arbitrarily folded. Identical candidate times within one
+  date collapse to their first input position.
 - **Feasibility reuses the expansion semantics**: each participant's ICS
   is reduced to busy intervals with the exact same machinery as
   `/freebusy-export` — same recurrence expansion, overrides and

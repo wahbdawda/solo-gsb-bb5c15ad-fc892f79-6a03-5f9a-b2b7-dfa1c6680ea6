@@ -405,6 +405,151 @@ def test_participant_busy_calendar_uses_its_own_dst():
     )
     assert free.status_code == 200
 
+
+# ---------------------------------------------------------------------------
+# DST gap/overlap in organizer-local candidate times: strict resolution
+# ---------------------------------------------------------------------------
+
+
+def test_spring_forward_gap_candidate_returns_422():
+    # America/New_York springs forward 2026-03-08 (02:00 -> 03:00), so the
+    # 02:30 wall clock never happens. The old code silently moved the
+    # meeting to 03:30 local; the request must now be rejected and name
+    # the date, the time and the timezone.
+    resp = rotation(
+        organizer_timezone="America/New_York",
+        dates=("2026-03-08",),
+        candidate_times=("02:30",),
+        participants=[participant("alice", timezone="UTC")],
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "2026-03-08" in detail
+    assert "02:30" in detail
+    assert "America/New_York" in detail
+    assert "does not exist" in detail
+
+
+def test_gap_candidate_rejected_even_with_valid_alternatives():
+    # One unresolvable candidate poisons the whole request even when other
+    # candidate times on the same date resolve fine.
+    resp = rotation(
+        organizer_timezone="America/New_York",
+        dates=("2026-03-08",),
+        candidate_times=("09:00", "02:30"),
+        participants=[participant("alice", timezone="UTC")],
+    )
+    assert resp.status_code == 422
+    assert "02:30" in resp.json()["detail"]
+
+
+def test_gap_boundary_minutes():
+    # 02:00 is the first nonexistent minute on the spring-forward date,
+    # while 03:00 exists again (07:00Z) and schedules normally.
+    gap = rotation(
+        organizer_timezone="America/New_York",
+        dates=("2026-03-08",),
+        candidate_times=("02:00",),
+        participants=[participant("alice", timezone="UTC")],
+    )
+    assert gap.status_code == 422
+    assert "02:00" in gap.json()["detail"]
+
+    ok = rotation(
+        organizer_timezone="America/New_York",
+        dates=("2026-03-08",),
+        candidate_times=("03:00",),
+        participants=[participant("alice", timezone="UTC")],
+    )
+    assert ok.status_code == 200
+    assert ok.json()["meetings"][0]["start"] == "2026-03-08T07:00:00Z"
+
+
+def test_fall_back_overlap_candidate_returns_422():
+    # America/New_York falls back 2026-11-01 (02:00 -> 01:00), so 01:30
+    # happens twice (05:30Z and 06:30Z). The old code always used fold=0;
+    # the ambiguity must now be rejected and name date, time and timezone.
+    resp = rotation(
+        organizer_timezone="America/New_York",
+        dates=("2026-11-01",),
+        candidate_times=("01:30",),
+        participants=[participant("alice", timezone="UTC")],
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "2026-11-01" in detail
+    assert "01:30" in detail
+    assert "America/New_York" in detail
+    assert "ambiguous" in detail
+
+
+def test_overlap_candidate_rejected_even_with_valid_alternatives():
+    resp = rotation(
+        organizer_timezone="America/New_York",
+        dates=("2026-11-01",),
+        candidate_times=("01:30", "09:00"),
+        participants=[participant("alice", timezone="UTC")],
+    )
+    assert resp.status_code == 422
+    assert "01:30" in resp.json()["detail"]
+
+
+def test_overlap_boundary_minutes():
+    # Every wall-clock minute in [01:00, 02:00) occurs twice on the
+    # fall-back date; 02:00 itself exists only once (EST, 07:00Z).
+    ambiguous = rotation(
+        organizer_timezone="America/New_York",
+        dates=("2026-11-01",),
+        candidate_times=("01:00",),
+        participants=[participant("alice", timezone="UTC")],
+    )
+    assert ambiguous.status_code == 422
+    assert "01:00" in ambiguous.json()["detail"]
+
+    ok = rotation(
+        organizer_timezone="America/New_York",
+        dates=("2026-11-01",),
+        candidate_times=("02:00",),
+        participants=[participant("alice", timezone="UTC")],
+    )
+    assert ok.status_code == 200
+    assert ok.json()["meetings"][0]["start"] == "2026-11-01T07:00:00Z"
+
+
+def test_transition_day_times_outside_gap_and_overlap_still_schedule():
+    # Times clear of the transition resolve exactly as before on both
+    # transition dates: 00:30 is EST (05:30Z) before the spring gap and
+    # EDT (04:30Z) before the fall overlap; 03:30 is EDT (07:30Z) after
+    # the gap and EST (08:30Z) after the overlap. With no preferences the
+    # input-order tie-break keeps candidate 0 on both dates.
+    resp = rotation(
+        organizer_timezone="America/New_York",
+        dates=("2026-03-08", "2026-11-01"),
+        candidate_times=("00:30", "03:30"),
+        participants=[participant("alice", timezone="UTC")],
+    )
+    assert resp.status_code == 200
+    meetings = resp.json()["meetings"]
+    assert [m["candidate_index"] for m in meetings] == [0, 0]
+    assert meetings[0]["start"] == "2026-03-08T05:30:00Z"
+    assert meetings[1]["start"] == "2026-11-01T04:30:00Z"
+
+
+def test_gap_in_another_organizer_timezone_returns_422():
+    # Europe/Berlin springs forward 2026-03-29 (02:00 -> 03:00).
+    resp = rotation(
+        organizer_timezone="Europe/Berlin",
+        dates=("2026-03-29",),
+        candidate_times=("02:30",),
+        participants=[participant("alice", timezone="UTC")],
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "2026-03-29" in detail
+    assert "02:30" in detail
+    assert "Europe/Berlin" in detail
+
+
 # ---------------------------------------------------------------------------
 # Overlapping / touching preferred ranges count their union, never their sum
 # ---------------------------------------------------------------------------
